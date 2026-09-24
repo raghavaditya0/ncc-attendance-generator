@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import * as XLSX from "xlsx";
 import {
   ArrowRight,
   Check,
@@ -19,6 +20,7 @@ import {
 type Language = "english" | "hindi";
 type ReasonKey = "fall-in" | "class" | "fest" | "camp" | "parade" | "training" | "duty" | "other";
 type Cadet = { id: number; name: string; rank: string; branch: string; enrollment: string };
+type DirectoryCadet = Cadet & { year: string };
 type Settings = { college: string; address: string; unit: string; recipient: string; signer: string; designation: string };
 
 const reasonOptions: Array<{ key: ReasonKey; label: string; hindi: string; color: string }> = [
@@ -63,6 +65,10 @@ export default function Home() {
   const [settings, setSettings] = useState<Settings>(defaultSettings);
   const [showSettings, setShowSettings] = useState(false);
   const [showImport, setShowImport] = useState(false);
+  const [showDirectory, setShowDirectory] = useState(false);
+  const [directory, setDirectory] = useState<DirectoryCadet[]>([]);
+  const [directorySearch, setDirectorySearch] = useState("");
+  const [selectedDirectoryIds, setSelectedDirectoryIds] = useState<number[]>([]);
   const [importText, setImportText] = useState("");
   const [notice, setNotice] = useState("");
   const [generatedAt, setGeneratedAt] = useState<Date | null>(null);
@@ -70,12 +76,16 @@ export default function Home() {
   const selectedReason = reasonOptions.find((item) => item.key === reason) ?? reasonOptions[0];
   const activeCadets = cadets.filter((cadet) => cadet.name.trim());
   const dateRange = startDate === endDate ? formatDate(startDate, language) : `${formatDate(startDate, language)} ${ui ? "से" : "to"} ${formatDate(endDate, language)}`;
+  const filteredDirectory = directory.filter((cadet) => `${cadet.name} ${cadet.rank} ${cadet.enrollment} ${cadet.year}`.toLowerCase().includes(directorySearch.toLowerCase())).slice(0, 100);
 
   useEffect(() => {
     const saved = localStorage.getItem("ncc-generator-settings");
     if (saved) { try { setSettings({ ...defaultSettings, ...JSON.parse(saved) }); } catch { /* keep defaults */ } }
+    const savedDirectory = localStorage.getItem("ncc-cadet-directory");
+    if (savedDirectory) { try { setDirectory(JSON.parse(savedDirectory)); } catch { /* ignore malformed local directory */ } }
   }, []);
   useEffect(() => { localStorage.setItem("ncc-generator-settings", JSON.stringify(settings)); }, [settings]);
+  useEffect(() => { if (directory.length) localStorage.setItem("ncc-cadet-directory", JSON.stringify(directory)); }, [directory]);
   useEffect(() => { if (!notice) return; const timer = window.setTimeout(() => setNotice(""), 2600); return () => window.clearTimeout(timer); }, [notice]);
 
   const details = useMemo(() => {
@@ -103,6 +113,41 @@ export default function Home() {
     setCadets(names.map((name, index) => ({ ...blankCadet(Date.now() + index), name })));
     setImportText(""); setShowImport(false); setNotice(`${names.length} ${ui ? "नाम जोड़ दिए गए" : "names imported"}`);
   };
+  const handleExcelUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    try {
+      const workbook = XLSX.read(await file.arrayBuffer(), { type: "array" });
+      const imported: DirectoryCadet[] = [];
+      workbook.SheetNames.forEach((sheetName) => {
+        const rows = XLSX.utils.sheet_to_json<unknown[]>(workbook.Sheets[sheetName], { header: 1, defval: "" });
+        const headerIndex = rows.findIndex((row) => String(row[0]).trim().toLowerCase() === "s.no");
+        if (headerIndex < 0) return;
+        rows.slice(headerIndex + 1).forEach((row, index) => {
+          const name = String(row[3] ?? "").trim();
+          if (!name || name === "undefined") return;
+          imported.push({ id: Date.now() + imported.length + index, year: sheetName, rank: String(row[2] ?? "").trim(), name, branch: sheetName, enrollment: String(row[1] ?? "").trim() });
+        });
+      });
+      const unique = Array.from(new Map(imported.map((cadet) => [`${cadet.enrollment}|${cadet.name.toLowerCase()}`, cadet])).values());
+      setDirectory(unique);
+      setSelectedDirectoryIds([]);
+      setDirectorySearch("");
+      setShowDirectory(true);
+      setNotice(`${unique.length} ${ui ? "cadets की list load हो गई" : "unique cadets loaded from Excel"}`);
+    } catch {
+      setNotice(ui ? "Excel file पढ़ी नहीं जा सकी" : "Could not read this Excel file");
+    }
+    event.target.value = "";
+  };
+  const toggleDirectoryCadet = (id: number) => setSelectedDirectoryIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
+  const applyDirectorySelection = () => {
+    const selected = directory.filter((cadet) => selectedDirectoryIds.includes(cadet.id)).map(({ id, year, ...cadet }) => ({ ...cadet, id }));
+    if (!selected.length) { setNotice(ui ? "कम से कम एक cadet select करो" : "Select at least one cadet"); return; }
+    setCadets(selected);
+    setShowDirectory(false);
+    setNotice(`${selected.length} ${ui ? "cadets attendance में जोड़ दिए" : "cadets added to attendance"}`);
+  };
   const generate = () => {
     if (!activeCadets.length) { setNotice(ui ? "कम से कम एक कैडेट का नाम डालो" : "Add at least one cadet name first"); return; }
     setGeneratedAt(new Date()); setNotice(ui ? "Application तैयार है" : "Application generated successfully"); document.getElementById("preview")?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -120,7 +165,7 @@ export default function Home() {
         <div className="field-row"><label className="field-label">{ui ? "From date" : "From date"}<input className="text-input" type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} /></label><label className="field-label">{ui ? "To date" : "To date"}<input className="text-input" type="date" value={endDate} min={startDate} onChange={(event) => setEndDate(event.target.value)} /></label></div>
         <div className="field-row compact-fields"><label className="field-label">{ui ? "Event / venue (optional)" : "Event / venue (optional)"}<input className="text-input" value={venue} onChange={(event) => setVenue(event.target.value)} placeholder="e.g. NCC Bhawan, Rohini" /></label><label className="field-label">{ui ? "Unit / Battalion" : "Unit / battalion"}<input className="text-input" value={settings.unit} onChange={(event) => setSettings({ ...settings, unit: event.target.value })} placeholder="e.g. 6 DBN GTBIT" /></label></div>
         <div className="field-block"><div className="field-label">{ui ? "Reason चुनो" : "What was it for?"}<span className="required">Required</span></div><div className="reason-grid">{reasonOptions.map((item) => <button key={item.key} className={`reason-card ${item.color} ${reason === item.key ? "selected" : ""}`} onClick={() => setReason(item.key)}><span>{item.label}</span><small>{item.hindi}</small>{reason === item.key && <Check size={14} className="reason-check" />}</button>)}</div></div>
-        <div className="cadet-heading"><div><div className="field-label">{ui ? "Attached nominal roll" : "Attached nominal roll"}<span className="required">Required</span></div><p>{ui ? "Rank, name, year/branch और enrollment number" : "Add every field exactly as shown in your PDF."}</p></div><button className="text-action" onClick={() => setShowImport(true)}><Clipboard size={15} /> Paste names</button></div>
+        <div className="cadet-heading"><div><div className="field-label">{ui ? "Attached nominal roll" : "Attached nominal roll"}<span className="required">Required</span></div><p>{ui ? "Rank, name, year/branch और enrollment number" : "Add every field exactly as shown in your PDF."}</p></div><div className="roll-actions"><label className="text-action upload-action"><Download size={15} /> Excel list<input type="file" accept=".xlsx,.xls" onChange={handleExcelUpload} /></label><button className="text-action" onClick={() => setShowImport(true)}><Clipboard size={15} /> Paste names</button></div></div>
         <div className="cadet-list"><div className="table-label-row"><span>S.No</span><span>Rank</span><span>Name</span><span>Year, Branch</span><span>Enrollment No.</span><span /></div>{cadets.map((cadet, index) => <div className="cadet-row" key={cadet.id}><span className="row-number">{String(index + 1).padStart(2, "0")}</span><input className="cadet-input" value={cadet.rank} onChange={(event) => updateCadet(cadet.id, "rank", event.target.value)} placeholder="SUO" /><input className="cadet-input" value={cadet.name} onChange={(event) => updateCadet(cadet.id, "name", event.target.value)} placeholder="Cadet full name" /><input className="cadet-input" value={cadet.branch} onChange={(event) => updateCadet(cadet.id, "branch", event.target.value)} placeholder="3RD, IT-EVE" /><input className="cadet-input" value={cadet.enrollment} onChange={(event) => updateCadet(cadet.id, "enrollment", event.target.value)} placeholder="00276803124" /><button className="delete-button" onClick={() => removeCadet(cadet.id)} aria-label="Remove cadet"><Trash2 size={16} /></button></div>)}</div><button className="add-button" onClick={addCadet}><Plus size={16} /> Add another cadet</button>
         <div className="generate-wrap"><button className="generate-button" onClick={generate}><span>{ui ? "Application बनाओ" : "Generate application"}</span><ArrowRight size={18} /></button><p><span className="secure-dot" /> {ui ? "आपका data इसी browser में रहता है" : "Your details stay in this browser"}</p></div>
       </section><aside className="quick-card"><div className="quick-top"><Layers3 size={18} /><span>{ui ? "PDF format matched" : "PDF format matched"}</span></div><h3>{ui ? "Nominal roll भी auto बनेगा" : "Your nominal roll, automatically attached."}</h3><p>{ui ? "Rank, branch और enrollment number सहित table application के साथ तैयार होगी।" : "Rank, year/branch and enrollment number will be formatted into the attached table."}</p><button onClick={() => setShowSettings(true)}>Edit college details <ArrowRight size={15} /></button><div className="quick-footer"><span>Tip</span> {ui ? "पहले Settings में college और ANO details भर दो" : "Save your college and ANO details once."}</div></aside></div>
@@ -129,6 +174,7 @@ export default function Home() {
     </main>
     {notice && <div className="toast"><Check size={16} /> {notice}</div>}
     {showImport && <div className="modal-backdrop no-print" onClick={() => setShowImport(false)}><div className="modal" onClick={(event) => event.stopPropagation()}><div className="modal-header"><div><span className="section-kicker">QUICK IMPORT</span><h2>Paste cadet names</h2></div><button className="icon-button" onClick={() => setShowImport(false)}><X size={18} /></button></div><p>One name per line, or separate names with commas. You can fill the other table columns after importing.</p><textarea autoFocus value={importText} onChange={(event) => setImportText(event.target.value)} placeholder={'Gaurav Kumar\nIshkant Sharma\nTanveer Singh'} /><button className="generate-button" onClick={importNames}>Add names <ArrowRight size={18} /></button></div></div>}
+    {showDirectory && <div className="modal-backdrop no-print" onClick={() => setShowDirectory(false)}><div className="modal directory-modal" onClick={(event) => event.stopPropagation()}><div className="modal-header"><div><span className="section-kicker">EXCEL NOMINAL ROLL</span><h2>Select cadets</h2></div><button className="icon-button" onClick={() => setShowDirectory(false)}><X size={18} /></button></div><p>{directory.length} cadets loaded from your workbook. Search and select only those present today. Sensitive columns such as phone, Aadhaar, bank and email were not imported.</p><input className="text-input directory-search" value={directorySearch} onChange={(event) => setDirectorySearch(event.target.value)} placeholder="Search name, rank, year or regimental no." /><div className="directory-list">{filteredDirectory.map((cadet) => <button key={cadet.id} className={`directory-row ${selectedDirectoryIds.includes(cadet.id) ? "selected" : ""}`} onClick={() => toggleDirectoryCadet(cadet.id)}><span className="directory-check">{selectedDirectoryIds.includes(cadet.id) ? <Check size={14} /> : ""}</span><span><strong>{cadet.name}</strong><small>{cadet.rank} · {cadet.year} · {cadet.enrollment}</small></span></button>)}</div><div className="directory-footer"><span>{selectedDirectoryIds.length} selected</span><button className="generate-button" onClick={applyDirectorySelection}>Use selected cadets <ArrowRight size={18} /></button></div></div></div>}
     {showSettings && <div className="modal-backdrop no-print" onClick={() => setShowSettings(false)}><div className="modal settings-modal" onClick={(event) => event.stopPropagation()}><div className="modal-header"><div><span className="section-kicker">SETTINGS</span><h2>College details</h2></div><button className="icon-button" onClick={() => setShowSettings(false)}><X size={18} /></button></div><p>These details are saved only on this device and added to every application.</p><label className="modal-field">College name<input className="text-input" value={settings.college} onChange={(event) => setSettings({ ...settings, college: event.target.value })} /></label><label className="modal-field">College address<input className="text-input" value={settings.address} onChange={(event) => setSettings({ ...settings, address: event.target.value })} /></label><label className="modal-field">Unit / battalion<input className="text-input" value={settings.unit} onChange={(event) => setSettings({ ...settings, unit: event.target.value })} /></label><label className="modal-field">Application addressed to<input className="text-input" value={settings.recipient} onChange={(event) => setSettings({ ...settings, recipient: event.target.value })} /></label><label className="modal-field">ANO / signer name<input className="text-input" value={settings.signer} onChange={(event) => setSettings({ ...settings, signer: event.target.value })} /></label><label className="modal-field">Designation<input className="text-input" value={settings.designation} onChange={(event) => setSettings({ ...settings, designation: event.target.value })} /></label><button className="generate-button" onClick={() => { setShowSettings(false); setNotice("College details saved"); }}>Save details <Check size={18} /></button></div></div>}
   </div>;
 }
